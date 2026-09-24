@@ -337,75 +337,147 @@ public class MangaLivreSource : IComicSource, IRequiresHttpClient
     }
 
     public async Task<IReadOnlyList<Chapter>> GetAllChaptersAsync(
-            string comicId,
-            string language,
-            CancellationToken ct = default
-        )
+        string comicId,
+        string language,
+        CancellationToken ct = default
+    )
+    {
+        var chaptersUrl = $"{BaseUrl}/manga/{comicId}";
+
+        var html = await GetHTMLAsync(chaptersUrl, ct);
+        if (html == null)
+            return Array.Empty<Chapter>();
+
+        var doc = new HtmlDocument();
+        doc.LoadHtml(html);
+
+        var chapterNodes = doc.DocumentNode.SelectNodes(
+            "//article[contains(@class, 'chapter-grid-item')]"
+        );
+
+        if (chapterNodes is not { Count: > 0 })
+            return Array.Empty<Chapter>();
+
+        var chapters = new List<Chapter>();
+
+        foreach (var node in chapterNodes)
         {
-            var chaptersUrl = $"{BaseUrl}/manga/{comicId}";
+            string? chapterNumberString =
+                node.GetAttributeValue("data-chapter-number", null);
 
-            var html = await GetHTMLAsync(chaptersUrl, ct);
-            if (html == null)
-                return Array.Empty<Chapter>();
+            string title =
+                node.GetAttributeValue("data-chapter-title", "Unknown");
 
-            var doc = new HtmlDocument();
-            doc.LoadHtml(html);
-
-            var chapterNodes = doc.DocumentNode.SelectNodes(
-                "//article[contains(@class, 'chapter-grid-item')]"
+            var linkNode = node.SelectSingleNode(
+                ".//a[contains(@class, 'chapter-grid-number')]"
             );
 
-            if (chapterNodes is not { Count: > 0 })
-                return Array.Empty<Chapter>();
+            string? chapterUrl =
+                linkNode?.GetAttributeValue("href", null);
 
-            var chapters = new List<Chapter>();
+            string? chapterId =
+                ExtractChapterIdFromUrl(chapterUrl);
 
-            foreach (var node in chapterNodes)
+            if (string.IsNullOrEmpty(chapterId))
+                continue;
+
+            double? number = null;
+
+            if (double.TryParse(
+                chapterNumberString,
+                out double parsedNumber))
             {
-                string? chapterNumberString =
-                    node.GetAttributeValue("data-chapter-number", null);
-
-                string title =
-                    node.GetAttributeValue("data-chapter-title", "Unknown");
-
-                var linkNode = node.SelectSingleNode(
-                    ".//a[contains(@class, 'chapter-grid-number')]"
-                );
-
-                string? chapterUrl =
-                    linkNode?.GetAttributeValue("href", null);
-
-                string? chapterId =
-                    ExtractChapterIdFromUrl(chapterUrl);
-
-                if (string.IsNullOrEmpty(chapterId))
-                    continue;
-
-                double? number = null;
-
-                if (double.TryParse(
-                    chapterNumberString,
-                    out double parsedNumber))
-                {
-                    number = parsedNumber;
-                }
-
-                chapters.Add(
-                    new Chapter(
-                        Id: chapterId,
-                        Title: title,
-                        Number: null,
-                        Volume: null,
-                        Language: language,
-                        Groups: Array.Empty<string>(),
-                        LastUpdate: null,
-                        Pages: null
-                    )
-                );
+                number = parsedNumber;
             }
 
-            return chapters;
+            chapters.Add(
+                new Chapter(
+                    Id: chapterId,
+                    Title: title,
+                    Number: null,
+                    Volume: null,
+                    Language: language,
+                    Groups: Array.Empty<string>(),
+                    LastUpdate: null,
+                    Pages: null
+                )
+            );
         }
+
+        return chapters;
+    }
+
+    public async Task<IReadOnlyList<ChapterPage>> GetChapterPagesAsync(
+        string comicId,
+        string chapterId,
+        CancellationToken ct = default
+    )
+    {
+        var pagesUrl = $"{BaseUrl}/capitulo/{chapterId}/";
+
+        var html = await GetHTMLAsync(pagesUrl, ct);
+        if (html == null)
+            return Array.Empty<ChapterPage>();
+
+        var doc = new HtmlDocument();
+        doc.LoadHtml(html);
+
+        var imgNodes = doc.DocumentNode.SelectNodes(
+            "//img[contains(@class, 'chapter-image')]"
+        );
+
+        if (imgNodes is not { Count: > 0 })
+            return Array.Empty<ChapterPage>();
+
+        var pages = new List<ChapterPage>(imgNodes.Count);
+
+        for (int i = 0; i < imgNodes.Count; i++)
+        {
+            var img = imgNodes[i];
+
+            string imageUrl = img.GetAttributeValue("src", "");
+
+            if (string.IsNullOrEmpty(imageUrl))
+                continue;
+
+            pages.Add(
+                new ChapterPage(
+                    Number: i + 1,
+                    ImageUrl: imageUrl
+                )
+            );
+        }
+
+        return pages;
+    }
+
+    public async Task<byte[]?> GetImageBytesAsync(string imageUrl, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(imageUrl))
+            return null;
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, imageUrl);
+        request.Headers.Add("Referer", BaseUrl);
+
+        using var response = await _httpClient!.SendAsync(request, ct);
+
+        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            throw new HttpRequestException(
+                "MangaLivre Rate Limit Exceeded. Try again later.",
+                null,
+                HttpStatusCode.TooManyRequests
+            );
+
+        if (!response.IsSuccessStatusCode)
+            return null;
+
+        return await response.Content.ReadAsByteArrayAsync(ct);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        return ValueTask.CompletedTask;
+    }
 
     private async Task<string?> GetHTMLAsync(string url, CancellationToken ct = default)
     {
@@ -416,7 +488,7 @@ public class MangaLivreSource : IComicSource, IRequiresHttpClient
 
         if (response.StatusCode == HttpStatusCode.TooManyRequests)
             throw new HttpRequestException(
-                "WeebCentral Rate Limit Exceeded. Try again later.",
+                "MangaLivre Rate Limit Exceeded. Try again later.",
                 null,
                 HttpStatusCode.TooManyRequests
             );
@@ -451,7 +523,7 @@ public class MangaLivreSource : IComicSource, IRequiresHttpClient
         if (string.IsNullOrEmpty(url))
             return null;
         var parts = url.TrimEnd('/').Split('/');
-        return parts.Length >= 2 ? parts[^2] : null;
+        return parts.Length > 0 ? parts[^1] : null;
     }
 
     private string? ExtractChapterIdFromUrl(string? url)
