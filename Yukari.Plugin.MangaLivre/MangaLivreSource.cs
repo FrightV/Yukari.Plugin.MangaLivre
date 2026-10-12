@@ -221,7 +221,9 @@ public class MangaLivreSource : IComicSource, IRequiresHttpClient
         CancellationToken ct = default
     )
     {
-        string searchUrl = $"{BaseUrl}?s={Uri.EscapeDataString(query)}";
+        string searchUrl = page <= 1
+            ? $"{BaseUrl}/?s={Uri.EscapeDataString(query)}"
+            : $"{BaseUrl}/page/{page}/?s={Uri.EscapeDataString(query)}";
 
         var html = await GetHTMLAsync(searchUrl, ct);
         if (html == null)
@@ -277,13 +279,72 @@ public class MangaLivreSource : IComicSource, IRequiresHttpClient
         CancellationToken ct = default
     )
     {
-        var trendingFilters = new Dictionary<string, IReadOnlyList<string>>(filters)
-        {
-            ["order"] = ["Descending"],
-            ["sort"] = ["Popularity"],
-        };
+        string url = page <= 1
+            ? $"{BaseUrl}/"
+            : $"{BaseUrl}/?atualizacoes={page}";
 
-        return await SearchAsync(string.Empty, trendingFilters, page, ct);
+        var html = await GetHTMLAsync(url, ct);
+
+        if (html == null)
+            return Array.Empty<Comic>();
+
+        var doc = new HtmlDocument();
+        doc.LoadHtml(html);
+
+        var mangaCards = doc.DocumentNode.SelectNodes(
+            "//h2[contains(normalize-space(.), 'ÚLTIMAS ATUALIZAÇÕES')]" +
+            "/ancestor::*[.//article[contains(@class, 'home-manga-card')]][1]" +
+            "//article[contains(@class, 'home-manga-card')]"
+        );
+
+        if (mangaCards is not { Count: > 0 })
+            return Array.Empty<Comic>();
+
+        var comics = new List<Comic>();
+
+        foreach (var mangaCard in mangaCards)
+        {
+            var linkNode = mangaCard.SelectSingleNode(
+                ".//a[contains(@class, 'home-manga-cover')]"
+            );
+
+            string? comicUrl = linkNode?.GetAttributeValue("href", null);
+
+            if (string.IsNullOrWhiteSpace(comicUrl))
+                continue;
+
+            string? comicId = ExtractIdFromUrl(comicUrl);
+
+            if (string.IsNullOrWhiteSpace(comicId))
+                continue;
+
+            var titleNode = mangaCard.SelectSingleNode(".//h3/a");
+
+            string title = titleNode?.InnerText.Trim() ?? "Unknown Title";
+
+            var imageNode = mangaCard.SelectSingleNode(
+                ".//img[contains(@class, 'manga-cover-img')]"
+            );
+
+            string? coverUrl = imageNode?.GetAttributeValue("src", null);
+
+            comics.Add(
+                new Comic(
+                    Id: comicId,
+                    ComicUrl: comicUrl,
+                    Title: title,
+                    Author: null,
+                    Description: null,
+                    Tags: [],
+                    Year: null,
+                    CoverImageUrl: coverUrl,
+                    Langs: ["pt-BR"]
+                )
+            );
+        }
+        return comics
+            .DistinctBy(comic => comic.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     public async Task<Comic?> GetDetailsAsync(string comicId, CancellationToken ct = default)
@@ -320,7 +381,11 @@ public class MangaLivreSource : IComicSource, IRequiresHttpClient
         );
         string? description = descriptionNode?.InnerText.Trim();
 
-        string? coverUrl = GetCoverUrl(comicId);
+        var coverNode = doc.DocumentNode.SelectSingleNode(
+            "//img[contains(@class, 'manga-cover-image')]"
+        );
+
+        string? coverUrl = coverNode?.GetAttributeValue("src", null);
 
         return new Comic(
             Id: comicId,
@@ -365,12 +430,13 @@ public class MangaLivreSource : IComicSource, IRequiresHttpClient
             string? chapterNumberString =
                 node.GetAttributeValue("data-chapter-number", null);
 
-            string title =
-                node.GetAttributeValue("data-chapter-title", "Unknown");
-
             var linkNode = node.SelectSingleNode(
                 ".//a[contains(@class, 'chapter-grid-number')]"
             );
+
+            var titleNode = linkNode?.SelectSingleNode(".//strong");
+
+            string title = titleNode?.InnerText.Trim() ?? "Unknown";
 
             string? chapterUrl =
                 linkNode?.GetAttributeValue("href", null);
@@ -381,20 +447,11 @@ public class MangaLivreSource : IComicSource, IRequiresHttpClient
             if (string.IsNullOrEmpty(chapterId))
                 continue;
 
-            double? number = null;
-
-            if (double.TryParse(
-                chapterNumberString,
-                out double parsedNumber))
-            {
-                number = parsedNumber;
-            }
-
             chapters.Add(
                 new Chapter(
                     Id: chapterId,
                     Title: title,
-                    Number: null,
+                    Number: chapterNumberString,
                     Volume: null,
                     Language: language,
                     Groups: Array.Empty<string>(),
